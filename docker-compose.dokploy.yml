@@ -13,7 +13,7 @@ services:
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASS}
       - MONGO_INITDB_DATABASE=textbee
     volumes:
-      - mongodb_data:/data/db
+      - mongodb_data_v2:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
       interval: 30s
@@ -108,5 +108,5 @@ services:
       - textbee-api
 
 volumes:
-  mongodb_data:
+  mongodb_data_v2:
   redis_data:

@@ -1,0 +1,112 @@
+# textbee on Dokploy — for your GitHub fork of textbee/textbee.
+# Commit this to the root of the fork. In Dokploy: Compose service >
+# Provider: GitHub > your fork > Compose Path: ./docker-compose.dokploy.yml
+# All ${VARS} come from Dokploy's Environment tab.
+# Domains are set per service in Dokploy's Domains tab — no host ports needed.
+
+services:
+  textbee-db:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASS}
+      - MONGO_INITDB_DATABASE=textbee
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  textbee-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Service name MUST stay "textbee-api" — the web app's server side
+  # hardcodes http://textbee-api:3001 when running in Docker.
+  textbee-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=3001
+      - MONGO_URI=mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASS}@textbee-db:27017/textbee?authSource=admin
+      - REDIS_URL=redis://textbee-redis:6379
+    expose:
+      - "3001"
+    depends_on:
+      textbee-db:
+        condition: service_healthy
+      textbee-redis:
+        condition: service_healthy
+
+  textbee-web:
+    build:
+      context: ./web
+      # Same as web/Dockerfile but accepts NEXT_PUBLIC_* as build args
+      # (they're baked in at build time) — so no Dockerfile edit needed.
+      dockerfile_inline: |
+        FROM node:22-alpine AS builder
+        RUN apk add --no-cache openssl openssl-dev
+        RUN corepack enable && corepack prepare pnpm@9.14.2 --activate
+        WORKDIR /app
+        COPY package.json pnpm-lock.yaml ./
+        RUN pnpm install --frozen-lockfile
+        COPY . .
+        ARG NEXT_PUBLIC_SITE_URL
+        ARG NEXT_PUBLIC_API_BASE_URL
+        ARG NEXT_PUBLIC_TURNSTILE_SITE_KEY
+        ARG NEXT_PUBLIC_GOOGLE_CLIENT_ID
+        ENV NEXT_TELEMETRY_DISABLED=1
+        RUN pnpm build
+
+        FROM node:22-alpine AS runner
+        RUN apk add --no-cache openssl openssl-dev
+        RUN corepack enable && corepack prepare pnpm@9.14.2 --activate
+        WORKDIR /app
+        ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 CONTAINER_RUNTIME=docker
+        RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs && chown -R nextjs:nodejs /app
+        COPY --from=builder --chown=nextjs:nodejs /app/next.config.js ./
+        COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+        COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+        COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+        COPY --from=builder --chown=nextjs:nodejs /app/package.json ./
+        COPY --from=builder --chown=nextjs:nodejs /app/pnpm-lock.yaml ./
+        RUN pnpm install --prod --frozen-lockfile
+        USER nextjs
+        ENV PORT=3000
+        EXPOSE 3000
+        CMD ["node", "server"]
+      args:
+        - NEXT_PUBLIC_SITE_URL=${NEXT_PUBLIC_SITE_URL}
+        - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+        - NEXT_PUBLIC_TURNSTILE_SITE_KEY=${NEXT_PUBLIC_TURNSTILE_SITE_KEY}
+        - NEXT_PUBLIC_GOOGLE_CLIENT_ID=${NEXT_PUBLIC_GOOGLE_CLIENT_ID}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+    expose:
+      - "3000"
+    depends_on:
+      - textbee-api
+
+volumes:
+  mongodb_data:
+  redis_data:
